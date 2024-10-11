@@ -20,7 +20,9 @@ def main():
     set_gpu_id(config)
     
     dm = CryoCARE_DataModule()
-    dm.load(config['train_data'])
+    #specify which part we are training
+    #which_partition = config['which_partition']
+    dm.load(config['train_data'], config['which_partition'], config['split_into'])
 
     net_conf = Config(
         axes='ZYXC',

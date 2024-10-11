@@ -9,11 +9,12 @@ from os.path import join
 
 class CryoCARE_Dataset(tf.keras.utils.Sequence):
     def __init__(self, tomo_paths_odd=None, tomo_paths_even=None, mask_paths=None,
-                 n_samples_per_tomo=None, extraction_shapes=None, mean=None, std=None,
+                 n_samples_per_tomo=None, extraction_shapes=None, mean=None, std=None, split_into=1,
                  sample_shape=(64, 64, 64), shuffle=True, n_normalization_samples=500, tilt_axis=None):
         self.tomo_paths_odd = tomo_paths_odd
         self.tomo_paths_even = tomo_paths_even
         self.mask_paths = mask_paths
+        self.split_into = split_into
         self.n_samples_per_tomo = n_samples_per_tomo
         self.tilt_axis = tilt_axis
 
@@ -31,7 +32,8 @@ class CryoCARE_Dataset(tf.keras.utils.Sequence):
 
         self.sample_shape = np.array(list(sample_shape))
         self.shuffle = shuffle
-        self.coords = None
+        #arbitrary elements for now
+        self.coords = np.empty(split_into)
 
         self.tomos_odd = [mrcfile.mmap(p, mode='r', permissive=True) for p in self.tomo_paths_odd]
         self.tomos_even = [mrcfile.mmap(p, mode='r', permissive=True) for p in self.tomo_paths_even]
@@ -39,17 +41,30 @@ class CryoCARE_Dataset(tf.keras.utils.Sequence):
 
         if self.mask_paths is None:
             self.mask_paths = [None] * self.n_tomos
-
+        
         self.create_coordinate_lists()
-        self.length = sum([c.shape[0] for c in self.coords])
-
+        print(np.shape(self.coords), 'Coords shape')
+        self.length = np.empty(self.split_into, dtype= np.int64)
+        #for j in range(len(self.tomo_paths_odd)):
+        #    for i in range(self.split_into):
+        #changes from c.shape[0] to c.shape[1] because we have added a dim for split_into partitions
+        for i in range(self.split_into):
+            self.length[i] = sum([c.shape[1] for c in self.coords])
+        
+        #assert np.all(self.length == self.length[0])
+        self.indices = np.empty((self.split_into, self.length[0]), dtype = np.int64)
+        print(self.length, type(self.length[0]))
+        print(np.shape(self.length[0]))
         if self.shuffle:
-            self.indices = np.random.permutation(self.length)
+            for i in range(self.split_into):
+                self.indices[i] = np.random.permutation(self.length[i])
         else:
-            self.indices = np.arange(self.length)
-
+            for i in range(self.split_into):
+                self.indices[i] = np.arange(self.length[i])
+        print(np.shape(self.coords), 'coords shape')
         if self.mean == None or self.std == None:
             self.compute_mean_std(n_samples=n_normalization_samples)
+        #self.split_idx = split_idx
 
     def save(self, path):
         np.savez(path,
@@ -57,6 +72,7 @@ class CryoCARE_Dataset(tf.keras.utils.Sequence):
                  tomo_paths_even=self.tomo_paths_even,
                  mean=self.mean,
                  std=self.std,
+                 split_into=self.split_into,
                  n_samples_per_tomo=self.n_samples_per_tomo,
                  extraction_shapes=self.extraction_shapes,
                  sample_shape=self.sample_shape,
@@ -65,7 +81,7 @@ class CryoCARE_Dataset(tf.keras.utils.Sequence):
                  tilt_axis=self.tilt_axis)
 
     @classmethod
-    def load(cls, path):
+    def load(cls, path, which_partition, split_into):
         tmp = np.load(path, allow_pickle=True)
         tomo_paths_odd = [str(p) for p in tmp['tomo_paths_odd']]
         tomo_paths_even = [str(p) for p in tmp['tomo_paths_even']]
@@ -75,42 +91,59 @@ class CryoCARE_Dataset(tf.keras.utils.Sequence):
         extraction_shapes = tmp['extraction_shapes']
         sample_shape = tmp['sample_shape']
         shuffle = tmp['shuffle']
-        coords = tmp['coords']
+        split_into = tmp['split_into']
+        #slice our coords to give the ones we want
+        coords = tmp['coords'] #[:, which_partition, :, :]
         if isinstance(tmp['tilt_axis'], np.ndarray):
             tilt_axis = None
         else:
             tilt_axis = tmp['tilt_axis']
-
+        
+        #make a new instance of our class having read from the numpy file
         ds = cls(tomo_paths_odd=tomo_paths_odd,
                  tomo_paths_even=tomo_paths_even,
                  mean=mean,
                  std=std,
-                 n_samples_per_tomo=n_samples_per_tomo,
+                 split_into=split_into,
+                 n_samples_per_tomo=n_samples_per_tomo, #worry about this
                  extraction_shapes=extraction_shapes,
                  sample_shape=sample_shape,
                  shuffle=shuffle,
                  tilt_axis=tilt_axis)
+        #overwrite the coords
+        ds.split_idx = which_partition
         ds.coords = coords
         return ds
 
     def compute_mean_std(self, n_samples=2000):
         samples = []
         print('Computing normalization parameters:')
-        for i in tqdm.trange(n_samples):
-            x, _ = self.__getitem__(i)
-            samples.append(x)
-
+        #we want to use all random halves/partitions for mean and std calculations
+        # if split_into > 1
+        
+        for split_idx in range(self.split_into):
+            for i in tqdm.trange(n_samples // self.split_into):
+                x, _ = self.__getitem__(i, split_idx = split_idx)
+                samples.append(x)
+            
         self.mean = np.mean(samples)
         self.std = np.std(samples)
         del (samples)
 
     def create_coordinate_lists(self):
-        self.coords = []
+        coord_list = []
         
         for odd, even, es, maskfile in zip(self.tomo_paths_odd, self.tomo_paths_even, self.extraction_shapes, self.mask_paths):
-            self.coords.append(self.__create_coords_for_tomo__(even, odd, es, maskfile))
-
-        self.coords = np.array(self.coords)
+            coord_list.append(self.__create_coords_for_tomo__(even, odd, es, maskfile))
+        #the output from __create_coords_for_tomo__ is a stacked array or  
+        #assert np.shape(coord_list[0])[1] % self.split_into == 0
+        #because the coordinates are random, we can just slice
+        self.coords = np.empty((len(self.tomo_paths_odd), self.split_into,  int(np.shape(coord_list[0])[0] // self.split_into), 3), dtype = np.int64)
+        interval = np.shape(coord_list[0])[0] // self.split_into
+        print('Interval', interval)
+        for j in range(len(self.tomo_paths_odd)):
+            for i in range(self.split_into):
+                self.coords[j][i] = coord_list[j][i * interval : i * interval + interval, :]
 
     def __create_coords_for_tomo__(self, even_path, odd_path, extraction_shape, mask_path):
         even = mrcfile.mmap(even_path, mode='r')
@@ -158,8 +191,8 @@ class CryoCARE_Dataset(tf.keras.utils.Sequence):
         
         sample_inds = np.random.choice(len(valid_inds[0]),
                                        n_samples,
-                                       replace=len(valid_inds[0]) < n_samples)
-        
+                                       replace=False)  #len(valid_inds[0]) < n_samples)
+        #not exactly sure what the modification above will do
         rand_inds = [v[sample_inds] for v in valid_inds]
         
 
@@ -181,11 +214,12 @@ class CryoCARE_Dataset(tf.keras.utils.Sequence):
             return x, y
 
     def __len__(self):
+        #might have to have this use split_idx
         return self.length
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx, split_idx):
         tomo_index, coord_index = idx // self.n_samples_per_tomo, idx % self.n_samples_per_tomo
-        z, y, x = self.coords[tomo_index][coord_index]
+        z, y, x = self.coords[tomo_index][split_idx][coord_index]
 
         even_subvolume = self.tomos_even[tomo_index].data[z:z + self.sample_shape[0],
                          y:y + self.sample_shape[1],
@@ -197,13 +231,14 @@ class CryoCARE_Dataset(tf.keras.utils.Sequence):
         return self.augment(np.array(even_subvolume)[..., np.newaxis], np.array(odd_subvolume)[..., np.newaxis])
 
     def __iter__(self):
-        for idx in self.indices:
-            yield self.__getitem__(idx)
+        for idx in self.indices[self.split_idx]:
+            yield self.__getitem__(idx, self.split_idx)
         self.on_epoch_end()
 
     def on_epoch_end(self):
         if self.shuffle:
-            self.indices = np.random.permutation(self.length)
+            for i in range(self.split_into):
+                self.indices[i] = np.random.permutation(self.length[i])
 
     def close(self):
         for even, odd in zip(self.tomos_even, self.tomos_odd):
@@ -212,10 +247,11 @@ class CryoCARE_Dataset(tf.keras.utils.Sequence):
 
 
 class CryoCARE_DataModule(object):
-    def __init__(self):
-        self.train_dataset = None
-        self.val_dataset = None
-
+    def __init__(self, split_into = 1):
+        self.split_into = split_into
+        self.train_dataset = [None for i in range(split_into)]
+        self.val_dataset = [None for i in range(split_into)]
+ 
     def setup(self, tomo_paths_odd, tomo_paths_even, mask_paths, n_samples_per_tomo = 1200, validation_fraction=0.1,
               sample_shape=(64, 64, 64), tilt_axis='Y', n_normalization_samples=500):
         train_extraction_shapes = []
@@ -226,24 +262,27 @@ class CryoCARE_DataModule(object):
                                                           validation_fraction=validation_fraction)
             train_extraction_shapes.append(tes)
             val_extraction_shapes.append(ves)
-
+        
+        #need to use split_into here
         self.train_dataset = CryoCARE_Dataset(tomo_paths_odd=tomo_paths_odd,
                                               tomo_paths_even=tomo_paths_even,
                                               mask_paths=mask_paths,
                                               mean=None,
                                               std=None,
+                                              split_into=self.split_into,
                                               n_samples_per_tomo=int(
                                                   n_samples_per_tomo * (1 - validation_fraction)),
                                               extraction_shapes=train_extraction_shapes,
                                               sample_shape=sample_shape,
                                               shuffle=True, n_normalization_samples=n_normalization_samples,
-                                              tilt_axis=tilt_axis)
+                                                  tilt_axis=tilt_axis)
 
         self.val_dataset = CryoCARE_Dataset(tomo_paths_odd=tomo_paths_odd,
                                             tomo_paths_even=tomo_paths_even,
                                             mask_paths=mask_paths,
                                             mean=self.train_dataset.mean,
                                             std=self.train_dataset.std,
+                                            split_into=self.split_into,
                                             n_samples_per_tomo=int(n_samples_per_tomo * validation_fraction),
                                             extraction_shapes=val_extraction_shapes,
                                             sample_shape=sample_shape,
@@ -251,12 +290,13 @@ class CryoCARE_DataModule(object):
                                             tilt_axis=None)
 
     def save(self, path):
-        self.train_dataset.save(join(path, 'train_data.npz'))
+        self.train_dataset.save(join(path,'train_data.npz'))
         self.val_dataset.save(join(path, 'val_data.npz'))
 
-    def load(self, path):
-        self.train_dataset = CryoCARE_Dataset.load(join(path, 'train_data.npz'))
-        self.val_dataset = CryoCARE_Dataset.load(join(path, 'val_data.npz'))
+    def load(self, path, which_partition, split_into):
+        self.train_dataset = CryoCARE_Dataset.load(join(path, 'train_data.npz'), which_partition, split_into)
+        self.val_dataset = CryoCARE_Dataset.load(join(path, 'val_data.npz'), which_partition, split_into)
+        self.which_partition = which_partition
 
     def __compute_extraction_shapes__(self, even_path, odd_path, tilt_axis_index, sample_shape, validation_fraction):
         even = mrcfile.mmap(even_path, mode='r')
@@ -286,7 +326,8 @@ class CryoCARE_DataModule(object):
             return x, y
 
         return normalize
-
+    
+    #we assume that self.which_partition has already been set in the load() call above
     def get_train_dataset(self):
         sample_shape = self.train_dataset.sample_shape
         ds = tf.data.Dataset.from_generator(self.train_dataset.__iter__,

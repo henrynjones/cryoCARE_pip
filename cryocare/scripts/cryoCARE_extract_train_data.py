@@ -23,7 +23,7 @@ def main():
     with open(args.conf, 'r') as f:
         config = json.load(f)
 
-    dm = CryoCARE_DataModule()
+    dm = CryoCARE_DataModule(split_into = config['split_into'] if 'split_into' in config else 1)
     dm.setup(config['odd'], config['even'], mask_paths=config['mask'] if 'mask' in config else None, n_samples_per_tomo=config['num_slices'],
                              validation_fraction=(1.0 - config['split']), sample_shape=config['patch_shape'],
                              tilt_axis=config['tilt_axis'], n_normalization_samples=config['n_normalization_samples'])
