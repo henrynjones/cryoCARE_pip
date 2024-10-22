@@ -249,8 +249,8 @@ class CryoCARE_Dataset(tf.keras.utils.Sequence):
 class CryoCARE_DataModule(object):
     def __init__(self, split_into = 1):
         self.split_into = split_into
-        self.train_dataset = [None for i in range(split_into)]
-        self.val_dataset = [None for i in range(split_into)]
+        self.train_dataset = None
+        self.val_dataset = None
  
     def setup(self, tomo_paths_odd, tomo_paths_even, mask_paths, n_samples_per_tomo = 1200, validation_fraction=0.1,
               sample_shape=(64, 64, 64), tilt_axis='Y', n_normalization_samples=500):
